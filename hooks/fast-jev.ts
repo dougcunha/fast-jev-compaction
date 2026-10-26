@@ -1,4 +1,5 @@
 import type {
+  Hook,
   On,
   PluginOptions,
   Register,
@@ -292,6 +293,112 @@ function notify(
   $.ui.toast(text, { timeoutMs: 15_000 });
 }
 
+const HANDOFF_COMMAND = 'jev-handoff';
+const HANDOFF_DELAY_MS = 100;
+const SWITCH_POLL_MS = 100;
+const SWITCH_LIMIT_MS = 3_000;
+const INLINE_SEED_MAX_CHARS = 100_000;
+
+type Api = Parameters<Hook<'command.run'>>[0];
+
+/** The keep threshold given as `/jev-handoff 0.3`; anything else keeps the configured one. */
+export function handoffThreshold(args: string): number | undefined {
+  const text = args.trim();
+  const value = Number(text);
+  return text !== '' && Number.isFinite(value) && value >= 0 && value <= 1 ? value : undefined;
+}
+
+function fence(text: string): string {
+  const longest = Math.max(2, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const ticks = '`'.repeat(longest + 1);
+  return `${ticks}\n${text}\n${ticks}`;
+}
+
+/** The kept messages as Markdown: every text and kept tool result verbatim. */
+export function renderHandoff(messages: readonly Message[], source: string): string {
+  const results = new Map<string, ToolResult>();
+  for (const message of messages) {
+    for (const result of message.toolResults ?? []) results.set(result.tool_use_id, result);
+  }
+  const parts = [
+    '# Previous session',
+    '',
+    `This session continues session ${source}. Below is its history, not summarized:`,
+    'Jev removed the tool calls and tool results that were no longer needed.',
+    'Continue from the last message. Do not redo work that the history shows as done.',
+    '',
+  ];
+  for (const message of messages) {
+    const lines: string[] = [];
+    if (message.text) lines.push(message.text);
+    for (const tool of message.toolUses) {
+      lines.push(`**${tool.tool}** ${fence(JSON.stringify(tool.input, null, 1))}`);
+      const result = results.get(tool.tool_use_id);
+      const text = result?.text ?? tool.text;
+      if (text !== undefined) {
+        const error = (result?.isError ?? tool.isError) === true;
+        lines.push(`Result${error ? ' (error)' : ''}:\n${fence(text)}`);
+      }
+    }
+    if (lines.length === 0) continue;
+    parts.push(`## ${message.role === 'user' ? 'User' : 'Assistant'}`, '', lines.join('\n\n'), '');
+  }
+  return parts.join('\n');
+}
+
+/** The first prompt of the new session: the history inline, or a pointer to its file when too long. */
+export function handoffSeed(markdown: string, file: string, count: number): string {
+  const reply = `Reply with one line, "Context loaded: ${count} messages.", and wait for the next instruction.`;
+  if (markdown.length <= INLINE_SEED_MAX_CHARS) return `${markdown}\n\n---\n\n${reply}`;
+  return `The history of the previous session is in ${file}. Read the whole file first. ${reply}`;
+}
+
+async function handoffFile($: Api, sessionId: string): Promise<string> {
+  const dir = (await $.env.get('TEMP')) ?? (await $.session.cwd());
+  return `${dir}/jev-handoff-${sessionId}-${await $.clock.now()}.md`;
+}
+
+async function waitForSessionSwitch($: Api, endedId: string): Promise<void> {
+  for (let waited = 0; waited < SWITCH_LIMIT_MS; waited += SWITCH_POLL_MS) {
+    await $.clock.sleep(SWITCH_POLL_MS);
+    if ((await $.session.id()) !== endedId) return;
+  }
+}
+
+/**
+ * Prunes the session with Jev, writes the kept history to a file, clears the
+ * session and submits the history as the new session's first prompt. Nothing
+ * is cleared before the file exists, so a failure loses nothing.
+ */
+async function runHandoff($: Api, configured: HookConfig, threshold: number | undefined): Promise<void> {
+  const sessionId = await $.session.id();
+  const messages = await $.session.messages();
+  const config = {
+    ...configured,
+    ...(threshold === undefined ? {} : { keepThreshold: threshold }),
+    apiKey: await getApiKey($, configured),
+  };
+  const { result } = await compactSession(messages, config, async (url, init) => {
+    const response = await $.http.fetch(url, init);
+    return { status: response.status, ok: response.ok, text: response.text };
+  });
+  for (const line of decisionLogLines(result)) $.ui.log(line);
+  const markdown = renderHandoff(result.messages, sessionId);
+  const file = await handoffFile($, sessionId);
+  await $.fs.write(file, markdown);
+  notify($, `handoff: kept ${result.messages.length}/${messages.length} messages (${summarize(result)}); ${file}`);
+  await $.command.run({ command: 'clear', args: '' });
+  await waitForSessionSwitch($, sessionId);
+  try {
+    await $.prompt.submit({ text: handoffSeed(markdown, file, result.messages.length) });
+  } catch (error) {
+    notify(
+      $,
+      `handoff: the history is in ${file}; the first prompt failed (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
@@ -323,6 +430,30 @@ export const register: Register = (on: On, options: PluginOptions) => {
       );
       return next(event);
     }
+  });
+
+  on('session.start', async ($, event, next) => {
+    try {
+      await $.command.register({
+        name: HANDOFF_COMMAND,
+        description: 'Prune the session with Jev and continue it in a new session, without a summary',
+        argumentHint: '[keep threshold 0-1]',
+      });
+    } catch (error) {
+      $.ui.log(`/${HANDOFF_COMMAND} unavailable (${error instanceof Error ? error.message : String(error)})`);
+    }
+    return next(event);
+  });
+
+  on('command.run', { command: HANDOFF_COMMAND }, async ($, event) => {
+    const threshold = handoffThreshold(event.args);
+    // $.command.run rejects inside a hook the turn waits on, so the work runs after it.
+    $.clock.after(HANDOFF_DELAY_MS, () => {
+      runHandoff($, configured, threshold).catch((error: unknown) => {
+        notify($, `handoff failed (${error instanceof Error ? error.message : String(error)})`);
+      });
+    });
+    return { text: 'fast-jev-compaction: pruning the session with Jev for a new session…' };
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {

@@ -8,9 +8,9 @@ library.
 > This is a fork of
 > [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction).
 > It adds two plugin options, `baseUrl` and `apiKeyEnv`, so the plugin can call
-> Jev through [OpenRouter](#other-system-one-providers) or OpenCode Zen, and a
-> [handoff script](#handoff-to-a-new-session) that continues a session in a new
-> one when `session.compact` hooks cannot run.
+> Jev through [OpenRouter](#other-system-one-providers) or OpenCode Zen, and the
+> [`/jev-handoff`](#handoff-to-a-new-session) command that continues a session
+> in a new one when `session.compact` hooks cannot run.
 
 ## What and why
 
@@ -201,18 +201,48 @@ names above.
 
 Some setups skip user-tier `session.compact` hooks (for example, a managed
 plugin in the `prepend` tier that sends the event past them), so the plugin
-never runs and `/compact` falls back to the built-in summary. The handoff
-script does not use hooks: it reads the session transcript, prunes it with the
-same library, writes the kept messages verbatim to a Markdown file and opens a
-new Claude Code session that receives the file with
-`--append-system-prompt-file`.
+never runs and `/compact` falls back to the built-in summary. The
+`/jev-handoff` command gives the same result through other events:
+
+1. It reads the session with `$.session.messages()` and prunes it with Jev, as
+   `session.compact` does.
+2. It writes the kept messages, verbatim, to a Markdown file in `TEMP`
+   (`jev-handoff-<session id>-<time>.md`), before anything is cleared.
+3. It runs `/clear` with `$.command.run`, waits for the new session id, and
+   submits the history as the first prompt of the new session with
+   `$.prompt.submit`. A history longer than 100,000 characters is not inlined:
+   the prompt tells Claude to read the file instead.
+
+```text
+/jev-handoff          # uses keepThreshold
+/jev-handoff 0.3      # keeps more tool calls and results
+```
+
+The new session answers `Context loaded: N messages.` and waits. If Jev fails,
+nothing is cleared; if the first prompt fails, a toast names the file. The
+`session.start` hook registers the command, and its `command.run` hook defers
+the work with `$.clock.after`, because `$.command.run` rejects inside a hook the
+turn is waiting on.
+
+Limitations: the new session gets the history as one prompt, not as structured
+turns; todos, panes and plugin state do not carry over. The default
+`keepThreshold` of 0.5 can drop every tool call of a long session, because only
+user and assistant text is always kept; pass a lower threshold to keep more
+results.
+
+#### Fallback script
+
+When `command.run` hooks are skipped too, `scripts/handoff.mjs` does the same
+without hooks: it reads the session transcript file, prunes it, writes the
+Markdown file and opens a new window with
+`claude --append-system-prompt-file <file>`.
 
 ```sh
 npm ci && npm run build   # once: the script imports dist/
 node scripts/handoff.mjs [--threshold 0.3] [--preserve 6] [--no-launch]
 ```
 
-Run it from a Bash tool call inside the session to hand off (it reads
+Run it from a Bash tool call inside the session (it reads
 `CLAUDE_CODE_SESSION_ID`), or pass `--session <id>`. Other options:
 `--config-dir` (defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`), `--cwd`,
 `--key-env`, `--base-url` and `--model`. The key comes from the first of
@@ -220,18 +250,7 @@ Run it from a Bash tool call inside the session to hand off (it reads
 and `--base-url` defaults to that provider's endpoint. The file goes to
 `<config dir>/jev-handoffs/`. The new window is opened with PowerShell
 (`pwsh`), so the launch is Windows-only; with `--no-launch` the script prints
-the `claude` command instead.
-
-A user-level skill makes it a slash command, e.g.
-`~/.claude/skills/jev-handoff/SKILL.md` with `disable-model-invocation: true`
-that tells Claude to run the script with `$ARGUMENTS`.
-
-Limitations: the new session gets the history as one block of system prompt
-text, not as structured turns; the file rides on every request (the prompt
-cache makes the later ones cheaper); todos, panes and plugin state do not carry
-over. The default `keepThreshold` of 0.5 can drop every tool call of a long
-session, because only user and assistant text is always kept; lower it with
-`--threshold` to keep more results.
+the `claude` command instead. The old session stays open.
 
 ## Development
 

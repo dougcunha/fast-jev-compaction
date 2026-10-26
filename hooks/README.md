@@ -79,6 +79,11 @@ reduction, per-reason counts, state size and request count; a per-call
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard.
 
+The `session.start` hook registers `/jev-handoff`; its `command.run` hook prunes
+the session with the same library, writes the kept history to a file, runs
+`/clear` and submits the history as the new session's first prompt. See the root
+README.
+
 ## Scope and caveat
 
 Function hooks are early access and may change between Claude Code releases.

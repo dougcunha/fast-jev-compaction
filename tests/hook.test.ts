@@ -3,6 +3,9 @@ import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  handoffSeed,
+  handoffThreshold,
+  renderHandoff,
   resolveHookConfig,
   summarize,
   toSessionMessages,
@@ -171,5 +174,46 @@ describe('compactSession', () => {
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe('handoff', () => {
+  it('reads a keep threshold between 0 and 1 from the command arguments', () => {
+    expect(handoffThreshold('0.3')).toBe(0.3);
+    expect(handoffThreshold(' 1 ')).toBe(1);
+    expect(handoffThreshold('')).toBeUndefined();
+    expect(handoffThreshold('1.5')).toBeUndefined();
+    expect(handoffThreshold('abc')).toBeUndefined();
+  });
+
+  it('renders texts and kept results verbatim, results from the user message or the call', () => {
+    const markdown = renderHandoff(
+      [
+        message('user', 'Fix it.'),
+        message('assistant', 'Reading.', {
+          toolUses: [
+            { tool_use_id: 'a', tool: 'Read', input: { file_path: 'a.md' } },
+            { tool_use_id: 'b', tool: 'Bash', input: { command: 'npm test' }, text: 'FAIL', isError: true },
+          ],
+        }),
+        message('user', '', { toolResults: [{ tool_use_id: 'a', text: 'x ``` y' }] }),
+        message('user', ''),
+      ],
+      'session-1',
+    );
+    expect(markdown).toContain('continues session session-1');
+    expect(markdown).toContain('## User\n\nFix it.');
+    expect(markdown).toContain('Result:\n````\nx ``` y\n````');
+    expect(markdown).toContain('Result (error):\n```\nFAIL\n```');
+    expect(markdown.match(/^## /gm)).toHaveLength(2);
+  });
+
+  it('inlines a short history in the first prompt and points to the file for a long one', () => {
+    expect(handoffSeed('history', 'f.md', 3)).toBe(
+      'history\n\n---\n\nReply with one line, "Context loaded: 3 messages.", and wait for the next instruction.',
+    );
+    const seed = handoffSeed('x'.repeat(100_001), 'f.md', 3);
+    expect(seed).toMatch(/^The history of the previous session is in f\.md\./);
+    expect(seed.length).toBeLessThan(300);
   });
 });
