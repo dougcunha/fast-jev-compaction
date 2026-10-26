@@ -53,7 +53,12 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest' });
+    expect(resolveHookConfig({})).toEqual({
+      compactAtPercent: 60,
+      minReductionRatio: 0.25,
+      model: 'jev-latest',
+      apiKeyEnv: 'TYPESAFE_API_KEY',
+    });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
     ).toEqual({
@@ -64,7 +69,11 @@ describe('hook config', () => {
       goal: 'g',
       compactAtPercent: 60,
       minReductionRatio: 0.25,
+      apiKeyEnv: 'TYPESAFE_API_KEY',
     });
+    expect(
+      resolveHookConfig({ baseUrl: 'https://openrouter.ai/api/v1/systemone', apiKeyEnv: 'OPENROUTER_API_KEY' }),
+    ).toMatchObject({ baseUrl: 'https://openrouter.ai/api/v1/systemone', apiKeyEnv: 'OPENROUTER_API_KEY' });
   });
 });
 
@@ -127,6 +136,20 @@ describe('compactSession', () => {
     expect(decisionLogLines(output)).toEqual([`decisions: ${decisionLog(output)}`]);
   });
 
+  it('sends the requests to the configured baseUrl', async () => {
+    const urls: string[] = [];
+    const answer = jevFetch(() => 0.9);
+    const config = {
+      ...resolveHookConfig({ preserveRecentMessages: 1, baseUrl: 'https://openrouter.ai/api/v1/systemone' }),
+      apiKey: 'k',
+    };
+    await compactSession(transcript(), config, async (url, init) => {
+      urls.push(url);
+      return answer(url, init);
+    });
+    expect(urls).toEqual(['https://openrouter.ai/api/v1/systemone']);
+  });
+
   it('splits a long decision log into ui.log lines under the host limit', async () => {
     const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k' };
     const { result: output } = await compactSession(transcript(), config, jevFetch(() => 0.1));
@@ -142,6 +165,9 @@ describe('compactSession', () => {
   it('throws on a missing key and on failed requests so the hook falls back', async () => {
     const config = resolveHookConfig({ preserveRecentMessages: 1 });
     await expect(compactSession(transcript(), config, jevFetch(() => 0))).rejects.toThrow(/TYPESAFE_API_KEY/);
+    await expect(
+      compactSession(transcript(), { ...config, apiKeyEnv: 'OPENROUTER_API_KEY' }, jevFetch(() => 0)),
+    ).rejects.toThrow(/OPENROUTER_API_KEY/);
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);

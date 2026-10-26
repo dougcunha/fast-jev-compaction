@@ -5,6 +5,13 @@ every tool call and result is scored in one fast request, stale ones are
 dropped or truncated, everything kept stays verbatim. Also usable as an npm
 library.
 
+> This is a fork of
+> [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction).
+> It adds two plugin options, `baseUrl` and `apiKeyEnv`, so the plugin can call
+> Jev through [OpenRouter](#other-system-one-providers) or OpenCode Zen, and a
+> [handoff script](#handoff-to-a-new-session) that continues a session in a new
+> one when `session.compact` hooks cannot run.
+
 ## What and why
 
 Most context compaction asks an LLM to summarize old turns. A summary is
@@ -146,8 +153,8 @@ Then add this repository as a plugin marketplace and install the plugin,
 either from the shell or as slash commands inside a session:
 
 ```sh
-claude plugin marketplace add tamaratran/fast-jev-compaction
-claude plugin install fast-jev-compaction@fast-jev-compaction
+claude plugin marketplace add dougcunha/fast-jev-compaction
+claude plugin install fast-jev-compaction@fast-jev-local
 ```
 
 The install prompts for the plugin options (API key, thresholds, `truncateHeadChars`,
@@ -161,6 +168,70 @@ could not remove enough (short sessions, or when it fails).
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is
 just the repo's `.claude-plugin/marketplace.json`.
+
+### Other System One providers
+
+OpenRouter and OpenCode Zen serve Jev through the same System One protocol
+(`POST …/systemone` with `model`, `state` and `questions`). Two plugin options
+select the provider:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `baseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint |
+| `apiKeyEnv` | `TYPESAFE_API_KEY` | Environment variable that holds the key: `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY` or `OPENCODE_API_KEY` |
+
+| Provider | `baseUrl` | `apiKeyEnv` | Models |
+| --- | --- | --- | --- |
+| TypeSafe | `https://api.typesafe.ai/v1/systemone` | `TYPESAFE_API_KEY` | `jev-latest` |
+| OpenRouter | `https://openrouter.ai/api/v1/systemone` | `OPENROUTER_API_KEY` | `jev-latest` (mapped to `~typesafe/jev-latest`) |
+| OpenCode Zen | `https://opencode.ai/zen/v1/systemone` | `OPENCODE_API_KEY` | `jev-1.13`, `jev-1.13-free` (set `model`) |
+
+Set them at install time:
+
+```sh
+claude plugin install fast-jev-compaction@fast-jev-local   --config baseUrl=https://openrouter.ai/api/v1/systemone   --config apiKeyEnv=OPENROUTER_API_KEY
+```
+
+or later with `/plugin configure fast-jev-compaction@fast-jev-local`. The
+sensitive `apiKey` option, when set, wins over the environment variable.
+`$.env.get` accepts literal names only, so `apiKeyEnv` is limited to the three
+names above.
+
+### Handoff to a new session
+
+Some setups skip user-tier `session.compact` hooks (for example, a managed
+plugin in the `prepend` tier that sends the event past them), so the plugin
+never runs and `/compact` falls back to the built-in summary. The handoff
+script does not use hooks: it reads the session transcript, prunes it with the
+same library, writes the kept messages verbatim to a Markdown file and opens a
+new Claude Code session that receives the file with
+`--append-system-prompt-file`.
+
+```sh
+npm ci && npm run build   # once: the script imports dist/
+node scripts/handoff.mjs [--threshold 0.3] [--preserve 6] [--no-launch]
+```
+
+Run it from a Bash tool call inside the session to hand off (it reads
+`CLAUDE_CODE_SESSION_ID`), or pass `--session <id>`. Other options:
+`--config-dir` (defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`), `--cwd`,
+`--key-env`, `--base-url` and `--model`. The key comes from the first of
+`OPENROUTER_API_KEY`, `TYPESAFE_API_KEY` and `OPENCODE_API_KEY` that is set,
+and `--base-url` defaults to that provider's endpoint. The file goes to
+`<config dir>/jev-handoffs/`. The new window is opened with PowerShell
+(`pwsh`), so the launch is Windows-only; with `--no-launch` the script prints
+the `claude` command instead.
+
+A user-level skill makes it a slash command, e.g.
+`~/.claude/skills/jev-handoff/SKILL.md` with `disable-model-invocation: true`
+that tells Claude to run the script with `$ARGUMENTS`.
+
+Limitations: the new session gets the history as one block of system prompt
+text, not as structured turns; the file rides on every request (the prompt
+cache makes the later ones cheaper); todos, panes and plugin state do not carry
+over. The default `keepThreshold` of 0.5 can drop every tool call of a long
+session, because only user and assistant text is always kept; lower it with
+`--threshold` to keep more results.
 
 ## Development
 

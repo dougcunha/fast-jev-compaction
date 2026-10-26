@@ -1,14 +1,26 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.3.0",
+  "version": "0.3.0-openrouter.1",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
     "apiKey": {
       "type": "string",
       "title": "TypeSafe API key",
-      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
+      "description": "API key. Leave unset to read it from the variable named in apiKeyEnv.",
       "sensitive": true
+    },
+    "apiKeyEnv": {
+      "type": "string",
+      "title": "API key variable",
+      "description": "Environment variable that holds the API key: TYPESAFE_API_KEY, OPENROUTER_API_KEY or OPENCODE_API_KEY.",
+      "default": "TYPESAFE_API_KEY"
+    },
+    "baseUrl": {
+      "type": "string",
+      "title": "System One endpoint",
+      "description": "System One endpoint URL: https://api.typesafe.ai/v1/systemone, https://openrouter.ai/api/v1/systemone or https://opencode.ai/zen/v1/systemone.",
+      "default": "https://api.typesafe.ai/v1/systemone"
     },
     "keepThreshold": {
       "type": "number",

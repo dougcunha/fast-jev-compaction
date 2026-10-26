@@ -31,8 +31,8 @@ hooks surface before installing or loading it:
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 export TYPESAFE_API_KEY="<your TypeSafe key>"
 
-claude plugin marketplace add tamaratran/fast-jev-compaction
-claude plugin install fast-jev-compaction@fast-jev-compaction
+claude plugin marketplace add dougcunha/fast-jev-compaction
+claude plugin install fast-jev-compaction@fast-jev-local
 ```
 
 For local development:
@@ -56,13 +56,18 @@ The plugin declares these `userConfig` values in
 | `maxRequestTokens` | `30000` |
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
+| `baseUrl` | `https://api.typesafe.ai/v1/systemone` |
+| `apiKeyEnv` | `TYPESAFE_API_KEY` |
 
-The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
-through `TYPESAFE_API_KEY`. The environment variable is the recommended
-development setup.
+The key can be supplied as the sensitive `apiKey` plugin option or through the
+environment variable named by `apiKeyEnv` (`TYPESAFE_API_KEY`,
+`OPENROUTER_API_KEY` or `OPENCODE_API_KEY`). The environment variable is the
+recommended development setup. `baseUrl` points the requests at another System
+One endpoint, such as OpenRouter's `https://openrouter.ai/api/v1/systemone`;
+see the root README for the providers.
 
-Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
-`model` is passed straight to the library; see the root README for what they
+Every option except `apiKey`, `apiKeyEnv`, `baseUrl`, `compactAtPercent`,
+`minReductionRatio` and `model` is passed straight to the library; see the root README for what they
 do. The `session.compact` hook runs the Jev requests concurrently. If Jev fails,
 the response is malformed, the key is unavailable, the history cannot be
 fitted into the state budget, or the estimated reduction is below
