@@ -218,6 +218,18 @@ never runs and `/compact` falls back to the built-in summary. The
 /jev-handoff 0.3      # keeps more tool calls and results
 ```
 
+To hand off automatically, set the `autoAction` plugin option to `handoff`.
+At `compactAtPercent`, the `turn.complete` hook of a main-session turn then
+runs the handoff instead of `/compact`. An automatic handoff stops, with a
+toast, when Jev removes less than `minReductionRatio`, so a history that hardly
+shrinks does not hand off on every turn.
+
+| `autoAction` | At `compactAtPercent` |
+| --- | --- |
+| `compact` (default) | `/compact`, as upstream |
+| `handoff` | `/jev-handoff` |
+| `off` | nothing |
+
 The new session answers `Context loaded: N messages.` and waits. If Jev fails,
 nothing is cleared; if the first prompt fails, a toast names the file. The
 `session.start` hook registers the command, and its `command.run` hook defers

@@ -61,6 +61,7 @@ describe('hook config', () => {
       minReductionRatio: 0.25,
       model: 'jev-latest',
       apiKeyEnv: 'TYPESAFE_API_KEY',
+      autoAction: 'compact',
     });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
@@ -73,10 +74,13 @@ describe('hook config', () => {
       compactAtPercent: 60,
       minReductionRatio: 0.25,
       apiKeyEnv: 'TYPESAFE_API_KEY',
+      autoAction: 'compact',
     });
     expect(
       resolveHookConfig({ baseUrl: 'https://openrouter.ai/api/v1/systemone', apiKeyEnv: 'OPENROUTER_API_KEY' }),
     ).toMatchObject({ baseUrl: 'https://openrouter.ai/api/v1/systemone', apiKeyEnv: 'OPENROUTER_API_KEY' });
+    expect(resolveHookConfig({ autoAction: 'handoff' }).autoAction).toBe('handoff');
+    expect(resolveHookConfig({ autoAction: 'summary' }).autoAction).toBe('compact');
   });
 });
 

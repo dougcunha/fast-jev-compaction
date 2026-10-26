@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.3.0-openrouter.2",
+  "version": "0.3.0-openrouter.3",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
@@ -39,6 +39,12 @@
       "title": "Compaction percentage",
       "description": "Context percentage at which turn.complete requests compaction.",
       "default": 60
+    },
+    "autoAction": {
+      "type": "string",
+      "title": "Automatic action",
+      "description": "What happens when the context reaches compactAtPercent: compact (/compact), handoff (/jev-handoff) or off.",
+      "default": "compact"
     },
     "minReductionRatio": {
       "type": "number",

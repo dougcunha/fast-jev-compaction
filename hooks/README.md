@@ -58,6 +58,7 @@ The plugin declares these `userConfig` values in
 | `model` | `jev-latest` |
 | `baseUrl` | `https://api.typesafe.ai/v1/systemone` |
 | `apiKeyEnv` | `TYPESAFE_API_KEY` |
+| `autoAction` | `compact` |
 
 The key can be supplied as the sensitive `apiKey` plugin option or through the
 environment variable named by `apiKeyEnv` (`TYPESAFE_API_KEY`,
@@ -66,7 +67,7 @@ recommended development setup. `baseUrl` points the requests at another System
 One endpoint, such as OpenRouter's `https://openrouter.ai/api/v1/systemone`;
 see the root README for the providers.
 
-Every option except `apiKey`, `apiKeyEnv`, `baseUrl`, `compactAtPercent`,
+Every option except `apiKey`, `apiKeyEnv`, `autoAction`, `baseUrl`, `compactAtPercent`,
 `minReductionRatio` and `model` is passed straight to the library; see the root README for what they
 do. The `session.compact` hook runs the Jev requests concurrently. If Jev fails,
 the response is malformed, the key is unavailable, the history cannot be
@@ -81,8 +82,10 @@ in-flight guard.
 
 The `session.start` hook registers `/jev-handoff`; its `command.run` hook prunes
 the session with the same library, writes the kept history to a file, runs
-`/clear` and submits the history as the new session's first prompt. See the root
-README.
+`/clear` and submits the history as the new session's first prompt. With
+`autoAction` set to `handoff`, the `turn.complete` hook runs the handoff instead
+of `/compact` at `compactAtPercent` (main-session turns only); `off` disables
+the automatic action. See the root README.
 
 ## Scope and caveat
 

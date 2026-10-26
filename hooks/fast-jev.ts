@@ -25,7 +25,12 @@ const HOOK_DEFAULTS = {
   minReductionRatio: 0.25,
   model: DEFAULT_MODEL,
   apiKeyEnv: 'TYPESAFE_API_KEY',
+  autoAction: 'compact' as AutoAction,
 };
+
+/** What `turn.complete` does at `compactAtPercent`. */
+export type AutoAction = 'compact' | 'handoff' | 'off';
+const AUTO_ACTIONS: readonly AutoAction[] = ['compact', 'handoff', 'off'];
 
 export type HookFetchInit = {
   method?: string;
@@ -48,6 +53,8 @@ export type HookConfig = CompactOptions & {
   apiKeyEnv: string;
   /** System One endpoint, e.g. `https://openrouter.ai/api/v1/systemone`. */
   baseUrl?: string;
+  /** What `turn.complete` does at `compactAtPercent`: `/compact`, `/jev-handoff` or nothing. */
+  autoAction: AutoAction;
   compactAtPercent: number;
   minReductionRatio: number;
   model: string;
@@ -86,6 +93,9 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     ),
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
     apiKeyEnv: optionString(options, 'apiKeyEnv') ?? HOOK_DEFAULTS.apiKeyEnv,
+    autoAction:
+      AUTO_ACTIONS.find((action) => action === optionString(options, 'autoAction')) ??
+      HOOK_DEFAULTS.autoAction,
   };
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
@@ -368,9 +378,16 @@ async function waitForSessionSwitch($: Api, endedId: string): Promise<void> {
 /**
  * Prunes the session with Jev, writes the kept history to a file, clears the
  * session and submits the history as the new session's first prompt. Nothing
- * is cleared before the file exists, so a failure loses nothing.
+ * is cleared before the file exists, so a failure loses nothing. An automatic
+ * handoff stops below `minReductionRatio`, so a history that hardly shrinks
+ * does not hand off again on every turn.
  */
-async function runHandoff($: Api, configured: HookConfig, threshold: number | undefined): Promise<void> {
+async function runHandoff(
+  $: Api,
+  configured: HookConfig,
+  threshold: number | undefined,
+  auto: boolean,
+): Promise<void> {
   const sessionId = await $.session.id();
   const messages = await $.session.messages();
   const config = {
@@ -383,6 +400,13 @@ async function runHandoff($: Api, configured: HookConfig, threshold: number | un
     return { status: response.status, ok: response.ok, text: response.text };
   });
   for (const line of decisionLogLines(result)) $.ui.log(line);
+  if (auto && reductionRatio(result) < config.minReductionRatio) {
+    notify(
+      $,
+      `auto handoff skipped (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
+    );
+    return;
+  }
   const markdown = renderHandoff(result.messages, sessionId);
   const file = await handoffFile($, sessionId);
   await $.fs.write(file, markdown);
@@ -449,7 +473,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     const threshold = handoffThreshold(event.args);
     // $.command.run rejects inside a hook the turn waits on, so the work runs after it.
     $.clock.after(HANDOFF_DELAY_MS, () => {
-      runHandoff($, configured, threshold).catch((error: unknown) => {
+      runHandoff($, configured, threshold, false).catch((error: unknown) => {
         notify($, `handoff failed (${error instanceof Error ? error.message : String(error)})`);
       });
     });
@@ -457,18 +481,32 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (compacting) return next(event);
+    if (compacting || configured.autoAction === 'off') return next(event);
+    if (configured.autoAction === 'handoff' && event.agentId !== undefined) return next(event);
     try {
       const { context } = await $.session.usage();
       if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
       compacting = true;
+      if (configured.autoAction === 'handoff') {
+        // Like the command: $.command.run rejects inside a hook the turn waits on.
+        $.clock.after(HANDOFF_DELAY_MS, () => {
+          runHandoff($, configured, undefined, true)
+            .catch((error: unknown) => {
+              notify($, `auto handoff failed (${error instanceof Error ? error.message : String(error)})`);
+            })
+            .finally(() => {
+              compacting = false;
+            });
+        });
+        return next(event);
+      }
       await $.session.compact();
+      compacting = false;
     } catch (error) {
+      compacting = false;
       $.ui.log(
         `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,
       );
-    } finally {
-      compacting = false;
     }
     return next(event);
   });
