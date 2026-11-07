@@ -10,6 +10,14 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
+import {
+  COST_DEFAULTS,
+  estimateCost,
+  formatCostReport,
+  type CostConfig,
+  type CostEstimate,
+  type CostInput,
+} from '../src/cost.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
 import type {
   CompactOptions,
@@ -26,11 +34,20 @@ const HOOK_DEFAULTS = {
   model: DEFAULT_MODEL,
   apiKeyEnv: 'TYPESAFE_API_KEY',
   autoAction: 'compact' as AutoAction,
+  trigger: 'percent' as Trigger,
 };
 
 /** What `turn.complete` does at `compactAtPercent`. */
 export type AutoAction = 'compact' | 'handoff' | 'off';
 const AUTO_ACTIONS: readonly AutoAction[] = ['compact', 'handoff', 'off'];
+
+/**
+ * When `turn.complete` acts: only at `compactAtPercent` (`percent`), or as soon
+ * as pruning is cheaper than keeping the context (`cost`). In both modes
+ * `compactAtPercent` stays as the ceiling.
+ */
+export type Trigger = 'percent' | 'cost';
+const TRIGGERS: readonly Trigger[] = ['percent', 'cost'];
 
 export type HookFetchInit = {
   method?: string;
@@ -47,8 +64,11 @@ export type HookFetchResponse = {
 /** The shape of `$.http.fetch`, so the hook can be driven without an engine. */
 export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetchResponse>;
 
-export type HookConfig = CompactOptions & {
+export type HookConfig = CompactOptions &
+  CostConfig & {
   apiKey?: string;
+  /** Whether `turn.complete` acts at `compactAtPercent` only, or also when pruning is cheaper. */
+  trigger: Trigger;
   /** Environment variable that holds the key: one of `API_KEY_ENVS`. */
   apiKeyEnv: string;
   /** System One endpoint, e.g. `https://openrouter.ai/api/v1/systemone`. */
@@ -83,8 +103,16 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     const value = options[key];
     if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = value;
   }
+  const costs = { ...COST_DEFAULTS };
+  for (const key of Object.keys(costs) as (keyof CostConfig)[]) {
+    costs[key] = optionNumber(options, key, COST_DEFAULTS[key]);
+  }
   const config: HookConfig = {
     ...numbers,
+    ...costs,
+    trigger:
+      TRIGGERS.find((trigger) => trigger === optionString(options, 'trigger')) ??
+      HOOK_DEFAULTS.trigger,
     compactAtPercent: optionNumber(options, 'compactAtPercent', HOOK_DEFAULTS.compactAtPercent),
     minReductionRatio: optionNumber(
       options,
@@ -375,6 +403,112 @@ async function waitForSessionSwitch($: Api, endedId: string): Promise<void> {
   }
 }
 
+const COST_COMMAND = 'jev-cost';
+
+/** What the cost check remembers between turns. */
+export type CostState = {
+  /** Fraction of the context that the last prune kept. */
+  keepRatio?: number;
+  /** When the last main-session turn ended, in ms since the epoch. */
+  lastTurnAt?: number;
+};
+
+export function recordKeepRatio(state: CostState, result: CompactResult): void {
+  state.keepRatio = 1 - reductionRatio(result);
+}
+
+/** The arguments of `/jev-cost`: `turns=8 keep=0.3 measure`. */
+export type CostArgs = {
+  turns?: number;
+  keepRatio?: number;
+  /** Run Jev on the session now to measure the keep ratio. */
+  measure: boolean;
+};
+
+export function parseCostArgs(args: string): CostArgs {
+  const parsed: CostArgs = { measure: false };
+  for (const word of args.trim().split(/\s+/)) {
+    if (word === 'measure') parsed.measure = true;
+    const [key, raw] = word.split('=');
+    if (raw === undefined || raw === '') continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) continue;
+    if (key === 'turns' && value >= 1) parsed.turns = Math.floor(value);
+    if (key === 'keep' && value >= 0 && value <= 1) parsed.keepRatio = value;
+  }
+  return parsed;
+}
+
+export type CostOverrides = {
+  turns?: number | undefined;
+  keepRatio?: number | undefined;
+  cacheCold?: boolean | undefined;
+};
+
+export type CostCheck = {
+  input: CostInput;
+  estimate: CostEstimate;
+  keepRatioSource: 'given' | 'measured' | 'assumed';
+  idleMinutes?: number;
+};
+
+/**
+ * The cost of keeping the context against the cost of pruning it now.
+ * Returns undefined when the session has no token count yet (a fresh session,
+ * or one just compacted, until its next response).
+ */
+export function costCheck(
+  config: HookConfig,
+  state: CostState,
+  context: { tokens?: number },
+  now: number,
+  overrides: CostOverrides = {},
+): CostCheck | undefined {
+  const tokens = context.tokens;
+  if (tokens === undefined || tokens <= 0) return undefined;
+  const idleMs = state.lastTurnAt === undefined ? undefined : Math.max(0, now - state.lastTurnAt);
+  const keepRatioSource =
+    overrides.keepRatio !== undefined ? 'given' : state.keepRatio !== undefined ? 'measured' : 'assumed';
+  const input: CostInput = {
+    inputPricePerMTok: config.inputPricePerMTok,
+    cacheReadMultiplier: config.cacheReadMultiplier,
+    cacheWriteMultiplier: config.cacheWriteMultiplier,
+    cacheTtlMinutes: config.cacheTtlMinutes,
+    jevCostUsd: config.jevCostUsd,
+    expectedTurns: overrides.turns ?? config.expectedTurns,
+    assumedKeepRatio: config.assumedKeepRatio,
+    minSavingUsd: config.minSavingUsd,
+    contextTokens: tokens,
+    keepRatio: overrides.keepRatio ?? state.keepRatio ?? config.assumedKeepRatio,
+    cacheCold:
+      overrides.cacheCold ?? (idleMs !== undefined && idleMs > config.cacheTtlMinutes * 60_000),
+    minReductionRatio: config.minReductionRatio,
+  };
+  const check: CostCheck = { input, estimate: estimateCost(input), keepRatioSource };
+  if (idleMs !== undefined) check.idleMinutes = idleMs / 60_000;
+  return check;
+}
+
+/** The text that `/jev-cost` prints. */
+export function renderCostCheck(
+  check: CostCheck,
+  context: { window: number; percent?: number },
+): string {
+  return formatCostReport(check.input, check.estimate, {
+    windowTokens: context.window,
+    ...(context.percent === undefined ? {} : { percent: context.percent }),
+    keepRatioSource: check.keepRatioSource,
+    ...(check.idleMinutes === undefined ? {} : { idleMinutes: check.idleMinutes }),
+  }).join('\n');
+}
+
+function engineFetch($: Pick<Api, 'http'>): HookFetch {
+  return async (url, init) => {
+    const response = await $.http.fetch(url, init);
+    return { status: response.status, ok: response.ok, text: response.text };
+  };
+}
+
 /**
  * Prunes the session with Jev, writes the kept history to a file, clears the
  * session and submits the history as the new session's first prompt. Nothing
@@ -387,6 +521,7 @@ async function runHandoff(
   configured: HookConfig,
   threshold: number | undefined,
   auto: boolean,
+  state: CostState,
 ): Promise<void> {
   const sessionId = await $.session.id();
   const messages = await $.session.messages();
@@ -395,10 +530,8 @@ async function runHandoff(
     ...(threshold === undefined ? {} : { keepThreshold: threshold }),
     apiKey: await getApiKey($, configured),
   };
-  const { result } = await compactSession(messages, config, async (url, init) => {
-    const response = await $.http.fetch(url, init);
-    return { status: response.status, ok: response.ok, text: response.text };
-  });
+  const { result } = await compactSession(messages, config, engineFetch($));
+  recordKeepRatio(state, result);
   for (const line of decisionLogLines(result)) $.ui.log(line);
   if (auto && reductionRatio(result) < config.minReductionRatio) {
     notify(
@@ -426,14 +559,13 @@ async function runHandoff(
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
+  const state: CostState = {};
 
   on('session.compact', async ($, event, next) => {
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
-      const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
-        const response = await $.http.fetch(url, init);
-        return { status: response.status, ok: response.ok, text: response.text };
-      });
+      const { result, messages } = await compactSession(event.messages, config, engineFetch($));
+      recordKeepRatio(state, result);
       for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
@@ -466,14 +598,48 @@ export const register: Register = (on: On, options: PluginOptions) => {
     } catch (error) {
       $.ui.log(`/${HANDOFF_COMMAND} unavailable (${error instanceof Error ? error.message : String(error)})`);
     }
+    try {
+      await $.command.register({
+        name: COST_COMMAND,
+        description: 'Show whether pruning with Jev is cheaper than keeping the context, with a verdict',
+        argumentHint: '[turns=N] [keep=0-1] [measure]',
+      });
+    } catch (error) {
+      $.ui.log(`/${COST_COMMAND} unavailable (${error instanceof Error ? error.message : String(error)})`);
+    }
     return next(event);
+  });
+
+  on('command.run', { command: COST_COMMAND }, async ($, event) => {
+    try {
+      const args = parseCostArgs(event.args);
+      if (args.measure) {
+        const messages = await $.session.messages();
+        const config = { ...configured, apiKey: await getApiKey($, configured) };
+        const { result } = await compactSession(messages, config, engineFetch($));
+        recordKeepRatio(state, result);
+      }
+      const { context } = await $.session.usage();
+      const check = costCheck(configured, state, context, await $.clock.now(), {
+        turns: args.turns,
+        keepRatio: args.keepRatio,
+      });
+      if (!check) {
+        return { text: 'fast-jev-compaction: the session has no token count yet. Send a message first.' };
+      }
+      return { text: renderCostCheck(check, context) };
+    } catch (error) {
+      return {
+        text: `fast-jev-compaction: cost check failed (${error instanceof Error ? error.message : String(error)})`,
+      };
+    }
   });
 
   on('command.run', { command: HANDOFF_COMMAND }, async ($, event) => {
     const threshold = handoffThreshold(event.args);
     // $.command.run rejects inside a hook the turn waits on, so the work runs after it.
     $.clock.after(HANDOFF_DELAY_MS, () => {
-      runHandoff($, configured, threshold, false).catch((error: unknown) => {
+      runHandoff($, configured, threshold, false, state).catch((error: unknown) => {
         notify($, `handoff failed (${error instanceof Error ? error.message : String(error)})`);
       });
     });
@@ -481,16 +647,24 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
+    const now = await $.clock.now();
+    if (event.agentId === undefined) state.lastTurnAt = now;
     if (compacting || configured.autoAction === 'off') return next(event);
     if (configured.autoAction === 'handoff' && event.agentId !== undefined) return next(event);
     try {
       const { context } = await $.session.usage();
-      if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
+      if ((context.percent ?? 0) < configured.compactAtPercent) {
+        if (configured.trigger !== 'cost' || event.agentId !== undefined) return next(event);
+        // The turn just ended, so the cache is warm.
+        const check = costCheck(configured, state, context, now, { cacheCold: false });
+        if (check?.estimate.verdict !== 'compact') return next(event);
+        $.ui.log(`cost trigger: ${check.estimate.reason}`);
+      }
       compacting = true;
       if (configured.autoAction === 'handoff') {
         // Like the command: $.command.run rejects inside a hook the turn waits on.
         $.clock.after(HANDOFF_DELAY_MS, () => {
-          runHandoff($, configured, undefined, true)
+          runHandoff($, configured, undefined, true, state)
             .catch((error: unknown) => {
               notify($, `auto handoff failed (${error instanceof Error ? error.message : String(error)})`);
             })

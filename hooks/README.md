@@ -59,6 +59,15 @@ The plugin declares these `userConfig` values in
 | `baseUrl` | `https://api.typesafe.ai/v1/systemone` |
 | `apiKeyEnv` | `TYPESAFE_API_KEY` |
 | `autoAction` | `compact` |
+| `trigger` | `percent` |
+| `inputPricePerMTok` | `3` |
+| `cacheReadMultiplier` | `0.1` |
+| `cacheWriteMultiplier` | `1.25` |
+| `cacheTtlMinutes` | `5` |
+| `jevCostUsd` | `0.01` |
+| `expectedTurns` | `10` |
+| `assumedKeepRatio` | `0.4` |
+| `minSavingUsd` | `0.02` |
 
 The key can be supplied as the sensitive `apiKey` plugin option or through the
 environment variable named by `apiKeyEnv` (`TYPESAFE_API_KEY`,
@@ -86,6 +95,12 @@ the session with the same library, writes the kept history to a file, runs
 `autoAction` set to `handoff`, the `turn.complete` hook runs the handoff instead
 of `/compact` at `compactAtPercent` (main-session turns only); `off` disables
 the automatic action. See the root README.
+
+The same hook registers `/jev-cost`, which prints the cost of keeping the
+context against the cost of pruning it, with a verdict. With `trigger` set to
+`cost`, `turn.complete` acts as soon as that verdict is COMPACT, before
+`compactAtPercent` (the ceiling). The cost options above feed this check; see
+"Cost check and cost trigger" in the root README.
 
 ## Scope and caveat
 

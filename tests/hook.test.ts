@@ -1,16 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import {
   compactSession,
+  costCheck,
   decisionLog,
   decisionLogLines,
   handoffSeed,
   handoffThreshold,
+  parseCostArgs,
+  recordKeepRatio,
+  renderCostCheck,
   renderHandoff,
   resolveHookConfig,
   summarize,
   toSessionMessages,
+  type CostState,
 } from '../hooks/fast-jev.ts';
-import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
+import {
+  applyDecisions,
+  collectToolCalls,
+  COST_DEFAULTS,
+  decideCall,
+  type CompactResult,
+  type Message,
+} from '../src/index.js';
 
 type SessionMessage = Message & { handle?: string };
 
@@ -57,6 +69,8 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
+      ...COST_DEFAULTS,
+      trigger: 'percent',
       compactAtPercent: 60,
       minReductionRatio: 0.25,
       model: 'jev-latest',
@@ -66,6 +80,8 @@ describe('hook config', () => {
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
     ).toEqual({
+      ...COST_DEFAULTS,
+      trigger: 'percent',
       apiKey: 'k',
       keepThreshold: 0.3,
       maxStateTokens: 1000,
@@ -81,6 +97,75 @@ describe('hook config', () => {
     ).toMatchObject({ baseUrl: 'https://openrouter.ai/api/v1/systemone', apiKeyEnv: 'OPENROUTER_API_KEY' });
     expect(resolveHookConfig({ autoAction: 'handoff' }).autoAction).toBe('handoff');
     expect(resolveHookConfig({ autoAction: 'summary' }).autoAction).toBe('compact');
+    expect(resolveHookConfig({ trigger: 'cost', expectedTurns: 4, jevCostUsd: 'x' })).toMatchObject({
+      trigger: 'cost',
+      expectedTurns: 4,
+      jevCostUsd: COST_DEFAULTS.jevCostUsd,
+    });
+    expect(resolveHookConfig({ trigger: 'always' }).trigger).toBe('percent');
+  });
+});
+
+describe('cost check', () => {
+  const config = resolveHookConfig({});
+  const now = 1_000_000;
+
+  it('parses the /jev-cost arguments and ignores bad ones', () => {
+    expect(parseCostArgs('')).toEqual({ measure: false });
+    expect(parseCostArgs('turns=8 keep=0.3 measure')).toEqual({ turns: 8, keepRatio: 0.3, measure: true });
+    expect(parseCostArgs('turns=0 keep=2 turns=x keep=')).toEqual({ measure: false });
+  });
+
+  it('returns nothing before the session has a token count', () => {
+    expect(costCheck(config, {}, {}, now)).toBeUndefined();
+    expect(costCheck(config, {}, { tokens: 0 }, now)).toBeUndefined();
+  });
+
+  it('uses the assumed keep ratio, then the measured one, then the given one', () => {
+    const context = { tokens: 100_000 };
+    expect(costCheck(config, {}, context, now)).toMatchObject({ keepRatioSource: 'assumed' });
+    expect(costCheck(config, { keepRatio: 0.3 }, context, now)).toMatchObject({
+      keepRatioSource: 'measured',
+      input: { keepRatio: 0.3 },
+    });
+    expect(costCheck(config, { keepRatio: 0.3 }, context, now, { keepRatio: 0.1, turns: 3 })).toMatchObject({
+      keepRatioSource: 'given',
+      input: { keepRatio: 0.1, expectedTurns: 3 },
+    });
+  });
+
+  it('treats the cache as expired after the TTL, unless the caller says the turn just ended', () => {
+    const context = { tokens: 100_000 };
+    const idle = { lastTurnAt: now - 6 * 60_000 };
+    expect(costCheck(config, idle, context, now)).toMatchObject({ input: { cacheCold: true } });
+    expect(costCheck(config, { lastTurnAt: now - 60_000 }, context, now)).toMatchObject({
+      input: { cacheCold: false },
+    });
+    expect(costCheck(config, idle, context, now, { cacheCold: false })).toMatchObject({
+      input: { cacheCold: false },
+    });
+  });
+
+  it('gives a verdict that follows the size of the context', () => {
+    expect(costCheck(config, {}, { tokens: 120_000 }, now)?.estimate.verdict).toBe('compact');
+    expect(costCheck(config, {}, { tokens: 20_000 }, now)?.estimate.verdict).toBe('keep');
+  });
+
+  it('prints a report with the verdict', () => {
+    const check = costCheck(config, {}, { tokens: 120_000 }, now)!;
+    const text = renderCostCheck(check, { window: 200_000, percent: 60 });
+    expect(text).toContain('120,000 tokens (60% of 200,000)');
+    expect(text).toContain('Verdict: COMPACT.');
+  });
+
+  it('records the keep ratio of a prune', () => {
+    const state: CostState = {};
+    recordKeepRatio(state, {
+      messages: [],
+      decisions: [],
+      stats: { charsBefore: 1000, charsAfter: 250 } as CompactResult['stats'],
+    });
+    expect(state.keepRatio).toBe(0.25);
   });
 });
 

@@ -197,6 +197,67 @@ sensitive `apiKey` option, when set, wins over the environment variable.
 `$.env.get` accepts literal names only, so `apiKeyEnv` is limited to the three
 names above.
 
+### Cost check and cost trigger
+
+Pruning has a price: the Jev run, and a cache miss on the first turn after the
+prune, because the pruned history is a new prompt prefix. It pays back because
+every later turn reads a smaller cached context. `/jev-cost` compares the two
+options and prints a verdict:
+
+```text
+/jev-cost                       # uses the option defaults
+/jev-cost turns=20 keep=0.25    # what-if: 20 more turns, the prune keeps 25%
+/jev-cost measure               # runs Jev on the session now to measure keep
+```
+
+```text
+Context: 120,000 tokens (60% of 200,000).
+Cache: warm (TTL 5 min). Idle for 0.5 min.
+Prune keeps 30% of the context (measured).
+Keep context: $0.36
+Prune now:    $0.24 (Jev $0.0100 + cache write $0.14 + cache reads $0.0972)
+Saving:       $0.12
+Break-even:   6 turns
+Verdict: COMPACT. Pruning saves $0.12 over 10 turns. It pays back after 6 turns.
+```
+
+For a context of `C` tokens that the prune cuts to `r · C`, with `N` turns left,
+`k` the cache-read multiplier (0.1) and `w` the cache-write multiplier (1.25):
+
+```text
+keep   = k·C + (N−1)·k·C                       (w·C for the first turn if the cache expired)
+prune  = Jev + w·r·C + (N−1)·k·r·C
+break-even N = 1 + (Jev + w·r·C − k·C) / (k·C·(1−r))
+```
+
+Context growth cancels out, so with a free Jev the break-even does not depend on
+`C`: only on `r`. At `r` = 0.3 pruning pays back after 5 turns; at `r` = 0.5,
+after 12. If the cache expired (idle longer than `cacheTtlMinutes`), the next
+turn rewrites the whole context anyway and pruning wins at once.
+
+Set `trigger` to `cost` and `turn.complete` acts (`autoAction`: `compact` or
+`handoff`) as soon as the verdict is COMPACT, not only at `compactAtPercent`,
+which stays as the ceiling. The keep ratio `r` is the one measured by the last
+prune of the session (any `/compact`, handoff or `/jev-cost measure`), or
+`assumedKeepRatio` before that. The turn just ended, so the trigger always
+assumes a warm cache. Subagent turns never trigger.
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `trigger` | `percent` | `percent`: act at `compactAtPercent`. `cost`: act when pruning is cheaper |
+| `inputPricePerMTok` | `3` | Base input price, USD per 1M tokens |
+| `cacheReadMultiplier` | `0.1` | Cache read price, as a multiple of the base price |
+| `cacheWriteMultiplier` | `1.25` | Cache write price (`2` for the 1-hour TTL) |
+| `cacheTtlMinutes` | `5` | Idle time after which the cache expires |
+| `jevCostUsd` | `0.01` | Your estimate of one Jev run (an assumption, not a measurement) |
+| `expectedTurns` | `10` | Turns you expect to do after now |
+| `assumedKeepRatio` | `0.4` | Fraction kept by a prune, until one was measured |
+| `minSavingUsd` | `0.02` | The cost trigger needs at least this saving |
+
+The model does not count the tokens that a prune cannot remove (system prompt,
+tools), so the real `r` is a little higher than the history's. `expectedTurns` is
+a guess; use `/jev-cost turns=N` to see how the verdict changes with it.
+
 ### Handoff to a new session
 
 Some setups skip user-tier `session.compact` hooks (for example, a managed

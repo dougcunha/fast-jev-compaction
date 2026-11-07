@@ -46,6 +46,60 @@
       "description": "What happens when the context reaches compactAtPercent: compact (/compact), handoff (/jev-handoff) or off.",
       "default": "compact"
     },
+    "trigger": {
+      "type": "string",
+      "title": "Automatic trigger",
+      "description": "percent: act only at compactAtPercent. cost: also act as soon as pruning is cheaper than keeping the context (compactAtPercent stays as the ceiling).",
+      "default": "percent"
+    },
+    "inputPricePerMTok": {
+      "type": "number",
+      "title": "Input price (USD per 1M tokens)",
+      "description": "Base input price of your model, used by the cost check.",
+      "default": 3
+    },
+    "cacheReadMultiplier": {
+      "type": "number",
+      "title": "Cache read multiplier",
+      "description": "Price of a cache read as a multiple of the base input price.",
+      "default": 0.1
+    },
+    "cacheWriteMultiplier": {
+      "type": "number",
+      "title": "Cache write multiplier",
+      "description": "Price of a cache write as a multiple of the base input price: 1.25 for the 5-minute TTL, 2 for 1 hour.",
+      "default": 1.25
+    },
+    "cacheTtlMinutes": {
+      "type": "number",
+      "title": "Cache TTL (minutes)",
+      "description": "Minutes after which an idle prompt cache expires.",
+      "default": 5
+    },
+    "jevCostUsd": {
+      "type": "number",
+      "title": "Jev run cost (USD)",
+      "description": "Your estimate of what one Jev pruning run costs.",
+      "default": 0.01
+    },
+    "expectedTurns": {
+      "type": "number",
+      "title": "Expected turns",
+      "description": "Turns you expect to do in the session after now; the cost check compares the two options over this many turns.",
+      "default": 10
+    },
+    "assumedKeepRatio": {
+      "type": "number",
+      "title": "Assumed keep ratio",
+      "description": "Fraction of the context that a prune keeps, until one prune of the session measured it.",
+      "default": 0.4
+    },
+    "minSavingUsd": {
+      "type": "number",
+      "title": "Minimum saving (USD)",
+      "description": "The cost trigger needs at least this saving over expectedTurns.",
+      "default": 0.02
+    },
     "minReductionRatio": {
       "type": "number",
       "title": "Minimum reduction ratio",
